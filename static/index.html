@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Competitor Monitor</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1e2230; --border: #2a2f3d;
+    --text: #e8eaf0; --muted: #9aa3b5; --accent: #7c9cff; --ok: #3ccf8e; --warn: #f5b84b; --bad: #ff6b6b;
+    --radius: 12px; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 -apple-system, "Segoe UI", Inter, Roboto, sans-serif; }
+  a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
+  header { padding: 20px 24px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  header h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: .2px; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .env { display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; }
+  .pill { padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); color: var(--muted); }
+  .pill.on { border-color: rgba(60,207,142,.5); color: var(--ok); }
+  main { display: grid; grid-template-columns: 300px 1fr; gap: 20px; padding: 20px 24px; max-width: 1400px; margin: 0 auto; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding: 16px; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; }
+  .panel h2 { margin: 0 0 12px; font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 600; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input { width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); font-size: 14px; }
+  input:focus { outline: 2px solid rgba(124,156,255,.4); border-color: var(--accent); }
+  button { margin-top: 14px; width: 100%; padding: 11px; border-radius: 8px; border: 0; background: var(--accent); color: #0b0e14; font-weight: 650; font-size: 14px; cursor: pointer; }
+  button:disabled { opacity: .55; cursor: wait; }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--border); margin-top: 0; width: auto; padding: 6px 10px; font-size: 12px; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .list { display: flex; flex-direction: column; gap: 8px; }
+  .comp { padding: 10px 12px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--border); cursor: pointer; }
+  .comp:hover { border-color: var(--accent); }
+  .comp .d { font-weight: 600; }
+  .comp .m { font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; gap: 8px; }
+  .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+  .badge.ok { background: rgba(60,207,142,.15); color: var(--ok); }
+  .badge.warn { background: rgba(245,184,75,.15); color: var(--warn); }
+  .badge.bad { background: rgba(255,107,107,.15); color: var(--bad); }
+  .badge.info { background: rgba(124,156,255,.15); color: var(--accent); }
+  .status { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--border); margin-bottom: 16px; }
+  .spinner { width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .card .k { font-size: 12px; color: var(--muted); } .card .v { font-size: 22px; font-weight: 700; margin-top: 2px; }
+  .card .s { font-size: 12px; color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }
+  td.num { font-family: var(--mono); white-space: nowrap; }
+  tr.new td:first-child { border-left: 3px solid var(--ok); }
+  .desc { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  pre.alert { background: #0b0e14; border: 1px solid var(--border); border-radius: 8px; padding: 12px; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; color: #cfd5e3; margin: 8px 0 0; }
+  .section { margin-top: 20px; }
+  .section h3 { font-size: 14px; margin: 0 0 8px; display: flex; align-items: center; gap: 10px; }
+  .notes { font-size: 12px; color: var(--muted); } .notes li { margin: 2px 0; }
+  .empty { color: var(--muted); padding: 24px; text-align: center; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  .runs { font-size: 13px; } .runs td { padding: 6px 8px; }
+  .diff .add { color: var(--ok); } .diff .rem { color: var(--bad); text-decoration: line-through; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Competitor Monitoring Alert Tool</h1>
+    <div class="sub">Crawl a competitor's blog, flag what's new since the last check, enrich with keyword data, alert Slack/email.</div>
+  </div>
+  <div class="env" id="env"></div>
+</header>
+
+<main>
+  <aside>
+    <div class="panel">
+      <h2>Check a competitor</h2>
+      <form id="form">
+        <label for="domain">Competitor domain</label>
+        <input id="domain" placeholder="e.g. ahrefs.com" autocomplete="off" required>
+        <label for="webhook">Slack webhook (optional, overrides server default)</label>
+        <input id="webhook" placeholder="https://hooks.slack.com/services/..." autocomplete="off">
+        <button id="go" type="submit">Run check</button>
+        <div class="hint">First run on a domain builds a baseline and flags posts from the last 7 days. Every later run only flags posts not seen before.</div>
+      </form>
+    </div>
+    <div class="panel" style="margin-top:16px">
+      <h2>Tracked competitors</h2>
+      <div class="list" id="competitors"><div class="empty">Nothing tracked yet</div></div>
+    </div>
+  </aside>
+
+  <section>
+    <div class="panel" id="result">
+      <div class="empty">Enter a domain to start. Results, the alert preview and run history will appear here.</div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtDate = (iso) => iso ? iso.slice(0, 10) : "—";
+const fmtTs = (iso) => iso ? new Date(iso).toLocaleString() : "—";
+const statusBadge = (s) => {
+  const map = { ok: "ok", running: "info", no_blog: "warn", blocked: "bad", unreachable: "bad", error: "bad" };
+  return `<span class="badge ${map[s] || "info"}">${esc((s || "").replace("_", " "))}</span>`;
+};
+let currentCompetitor = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+async function loadEnv() {
+  try {
+    const h = await api("/api/health");
+    $("#env").innerHTML =
+      `<span class="pill ${h.keyword_provider ? "on" : ""}">keywords: ${h.keyword_provider || "no API key"}</span>` +
+      `<span class="pill ${h.slack_default ? "on" : ""}">slack: ${h.slack_default ? "configured" : "per-run webhook"}</span>` +
+      `<span class="pill ${h.email ? "on" : ""}">email: ${h.email ? "configured" : "off"}</span>`;
+  } catch {}
+}
+
+async function loadCompetitors() {
+  const list = await api("/api/competitors");
+  if (!list.length) { $("#competitors").innerHTML = '<div class="empty">Nothing tracked yet</div>'; return; }
+  $("#competitors").innerHTML = list.map(c => `
+    <div class="comp" data-id="${c.id}" data-run="${c.last_run_id || ""}" data-domain="${esc(c.domain)}">
+      <div class="d">${esc(c.domain)}</div>
+      <div class="m"><span>${c.post_count} posts · ${c.run_count} runs</span>${statusBadge(c.last_status || "never")}</div>
+    </div>`).join("");
+  document.querySelectorAll(".comp").forEach(el => el.onclick = () => {
+    currentCompetitor = +el.dataset.id;
+    $("#domain").value = el.dataset.domain;
+    if (el.dataset.run) showRun(+el.dataset.run); else renderHistory(currentCompetitor);
+  });
+}
+
+$("#form").onsubmit = async (e) => {
+  e.preventDefault();
+  const btn = $("#go"); btn.disabled = true; btn.textContent = "Running…";
+  try {
+    const r = await api("/api/check", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: $("#domain").value, slack_webhook: $("#webhook").value }) });
+    currentCompetitor = r.competitor_id;
+    await pollRun(r.run_id);
+  } catch (err) {
+    $("#result").innerHTML = `<div class="status"><span class="badge bad">error</span> ${esc(err.message)}</div>`;
+  } finally { btn.disabled = false; btn.textContent = "Run check"; loadCompetitors(); }
+};
+
+async function pollRun(runId) {
+  for (;;) {
+    const run = await api(`/api/runs/${runId}`);
+    if (run.status !== "running") { renderRun(run); loadCompetitors(); return; }
+    $("#result").innerHTML = `<div class="status"><div class="spinner"></div><div><strong>Checking…</strong> <span style="color:var(--muted)">${esc(run.status_detail || "")}</span></div></div>`;
+    await new Promise(r => setTimeout(r, 1500));
+  }
+}
+
+async function showRun(runId) { const run = await api(`/api/runs/${runId}`); renderRun(run); }
+
+function postRow(p, isNew) {
+  const vol = p.search_volume == null ? '<span style="color:var(--muted)">n/a</span>' : Number(p.search_volume).toLocaleString();
+  const cpc = typeof p.cpc === "number" ? `$${p.cpc.toFixed(2)}` : "—";
+  return `<tr class="${isNew ? "new" : ""}">
+    <td><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title || p.url)}</a>
+        ${p.description ? `<div class="desc">${esc(p.description.slice(0, 160))}${p.description.length > 160 ? "…" : ""}</div>` : ""}</td>
+    <td class="num">${fmtDate(p.published_at)}</td>
+    <td>${esc(p.keyword || "—")}<div class="desc">${esc(p.keyword_source || "")}</div></td>
+    <td class="num">${vol}</td><td class="num">${cpc}</td></tr>`;
+}
+
+function renderRun(run) {
+  const s = run.summary || {};
+  const newPosts = s.new_posts || [];
+  const all = s.all_posts || [];
+  const pricing = s.pricing || {};
+  const alert = s.alert || {};
+  const kw = s.keyword_status || {};
+  let html = `<div class="row" style="margin-bottom:12px">
+      <div><strong style="font-size:17px">${esc(s.domain || "")}</strong> &nbsp; ${statusBadge(run.status)}
+        ${run.is_baseline ? '<span class="badge info">baseline run</span>' : ""}</div>
+      <div style="color:var(--muted);font-size:12px">Run #${run.id} · ${fmtTs(run.started_at)}</div></div>`;
+
+  if (run.status !== "ok") {
+    html += `<div class="status"><span class="badge bad">${esc(run.status.replace("_"," "))}</span><div>${esc(run.status_detail || "")}</div></div>`;
+    html += `<div class="section"><h3>Alert</h3><div class="notes">${esc(alert.detail || run.alert_detail || "")}</div>${alert.headline ? `<pre class="alert">${esc(alert.headline)}\n${esc(alert.body || "")}</pre>` : ""}</div>`;
+  } else {
+    html += `<div class="cards">
+      <div class="card"><div class="k">New posts flagged</div><div class="v" style="color:var(--ok)">${newPosts.length}</div><div class="s">${run.is_baseline ? "published in last 7 days" : "not seen in previous runs"}</div></div>
+      <div class="card"><div class="k">Posts scanned</div><div class="v">${all.length}</div><div class="s">${s.feed_url ? "via feed + sitemap + listing" : "via sitemap + listing"}</div></div>
+      <div class="card"><div class="k">Pricing</div><div class="v" style="color:${pricing.changed ? "var(--warn)" : "var(--text)"}">${pricing.found ? (pricing.changed ? "changed" : (pricing.baseline ? "captured" : "same")) : "none"}</div><div class="s">${pricing.found ? `${(pricing.prices||[]).length} price points` : "no pricing page"}</div></div>
+      <div class="card"><div class="k">Alert</div><div class="v" style="color:${alert.sent ? "var(--ok)" : "var(--muted)"}">${alert.sent ? "sent" : "preview"}</div><div class="s">${esc((alert.detail || "").slice(0, 60))}</div></div>
+    </div>`;
+    html += `<div class="status" style="flex-wrap:wrap"><span class="badge ${kw.ok ? "ok" : "warn"}">keywords</span><div>${esc(kw.detail || "")}</div></div>`;
+
+    html += `<div class="section"><h3>New posts ${run.is_baseline ? "(last 7 days)" : "since last check"} <span class="badge ok">${newPosts.length}</span></h3>`;
+    html += newPosts.length ? `<table><thead><tr><th>Title</th><th>Published</th><th>Target keyword</th><th>Volume/mo</th><th>CPC</th></tr></thead><tbody>${newPosts.map(p => postRow(p, true)).join("")}</tbody></table>`
+                            : `<div class="empty">Nothing new. ${run.is_baseline ? "No posts published in the last 7 days." : "Every post found was already stored from an earlier run."}</div>`;
+    html += `</div>`;
+
+    html += `<div class="section"><h3>Pricing ${pricing.found ? `· <a href="${esc(pricing.url)}" target="_blank" rel="noopener">${esc(pricing.url)}</a>` : ""}</h3>`;
+    if (!pricing.found) html += `<div class="notes">${esc(pricing.detail || "No pricing page found")}</div>`;
+    else {
+      html += `<div class="notes">${esc(pricing.detail || "")}</div>`;
+      const d = pricing.diff || {};
+      if (pricing.changed) html += `<div class="diff" style="margin-top:6px;font-size:13px">${(d.added||[]).map(x => `<div class="add">+ ${esc(x.plan)} ${esc(x.price)}</div>`).join("")}${(d.removed||[]).map(x => `<div class="rem">− ${esc(x.plan)} ${esc(x.price)}</div>`).join("")}</div>`;
+      if ((pricing.prices || []).length) html += `<details style="margin-top:6px;font-size:13px"><summary style="cursor:pointer;color:var(--muted)">Current price points</summary><div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">${pricing.prices.map(x => `<span class="pill">${esc(x.plan ? x.plan + " · " : "")}${esc(x.price)}</span>`).join("")}</div></details>`;
+    }
+    html += `</div>`;
+
+    html += `<div class="section"><h3>Alert ${alert.sent ? '<span class="badge ok">delivered</span>' : '<span class="badge warn">preview only</span>'}</h3>
+      <div class="notes">${esc(alert.detail || "")}</div><pre class="alert">${esc(alert.headline || "")}\n\n${esc((alert.body || "").replace(/<([^|>]+)\|([^>]+)>/g, "$2 — $1"))}</pre></div>`;
+
+    html += `<div class="section"><details><summary style="cursor:pointer;font-size:14px;font-weight:600">All posts scanned this run (${all.length})</summary>
+      <table style="margin-top:8px"><thead><tr><th>Title</th><th>Published</th><th>Keyword</th><th>Volume</th><th>CPC</th></tr></thead><tbody>${all.map(p => postRow(p, newPosts.some(n => n.url === p.url))).join("")}</tbody></table></details></div>`;
+  }
+  if ((s.notes || []).length) html += `<div class="section"><h3>Crawl notes</h3><ul class="notes">${s.notes.map(n => `<li>${esc(n)}</li>`).join("")}</ul></div>`;
+  html += `<div class="section" id="history"></div>`;
+  $("#result").innerHTML = html;
+  renderHistory(run.competitor_id, true);
+}
+
+async function renderHistory(competitorId, append) {
+  const runs = await api(`/api/competitors/${competitorId}/runs`);
+  const html = `<h3>Run history</h3><table class="runs"><thead><tr><th>#</th><th>Started</th><th>Status</th><th>Scanned</th><th>New</th><th>Pricing</th><th>Alert</th><th></th></tr></thead><tbody>
+    ${runs.map(r => `<tr><td>${r.id}</td><td>${fmtTs(r.started_at)}</td><td>${statusBadge(r.status)}${r.is_baseline ? ' <span class="badge info">baseline</span>' : ""}</td><td class="num">${r.total_posts_found}</td><td class="num">${r.new_posts_count}</td><td>${r.pricing_changed ? '<span class="badge warn">changed</span>' : "—"}</td><td>${r.alert_sent ? '<span class="badge ok">sent</span>' : '<span class="badge">preview</span>'}</td><td><button class="ghost" onclick="showRun(${r.id})">view</button></td></tr>`).join("")}
+  </tbody></table>`;
+  if (append && $("#history")) $("#history").innerHTML = html; else $("#result").innerHTML = `<div class="section">${html}</div>`;
+}
+
+loadEnv(); loadCompetitors();
+</script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: competitor-monitor
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: DB_PATH
+        value: /app/data/monitor.db
+      - key: NEW_WINDOW_DAYS
+        value: "7"
+      - key: DATAFORSEO_LOGIN
+        sync: false
+      - key: DATAFORSEO_PASSWORD
+        sync: false
+      - key: KEYWORDS_EVERYWHERE_API_KEY
+        sync: false
+      - key: SLACK_WEBHOOK_URL
+        sync: false
