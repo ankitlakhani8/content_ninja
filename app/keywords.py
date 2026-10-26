@@ -19,10 +19,12 @@ from typing import Any
 import httpx
 
 STOPWORDS = {
-    "a", "an", "the", "and", "or", "of", "to", "in", "on", "for", "with", "your", "you", "is", "are", "how",
-    "what", "why", "when", "which", "who", "vs", "vs.", "from", "by", "at", "as", "it", "its", "this", "that",
-    "we", "our", "ultimate", "complete", "guide", "introducing", "announcing", "new", "best", "top", "into",
+    # Only words that never belong in a search query. Prepositions and "best"/"top" stay: they are
+    # part of real keywords ("best time to post on tiktok").
+    "a", "an", "the", "your", "you", "is", "are", "how", "what", "why", "when", "which", "who", "it", "its",
+    "this", "that", "we", "our", "ultimate", "complete", "guide", "introducing", "announcing", "new", "into",
     "do", "does", "can", "should", "will", "about", "every", "everything", "need", "know", "tips", "ways",
+    "here", "heres", "there", "i", "my", "me", "us",
 }
 LEADING_PATTERNS = re.compile(
     r"^(how to|how|what is|what are|why|the ultimate guide to|a guide to|guide to|introducing|announcing|"
@@ -48,10 +50,16 @@ def derive_keyword(title: str | None, description: str | None = None) -> str | N
     if 1 <= len(head_tokens) <= 5 and head_clean != _clean(title) and not LEADING_PATTERNS.match(head_clean):
         return head_clean[:80]
     t = LEADING_PATTERNS.sub("", _clean(title))
-    tokens = [w for w in t.split() if w not in STOPWORDS and not re.fullmatch(r"(19|20)\d{2}", w)]
+    tokens = [w for w in t.split() if w not in STOPWORDS and not re.fullmatch(r"\d+", w)]
     if not tokens:
         tokens = t.split()
-    keyword = " ".join(tokens[:4]).strip()
+    tokens = tokens[:6]
+    edge = {"to", "for", "in", "on", "of", "with", "and", "at", "by", "from", "or", "vs"}
+    while tokens and tokens[0] in edge:
+        tokens.pop(0)
+    while tokens and tokens[-1] in edge:
+        tokens.pop()
+    keyword = " ".join(tokens).strip()
     return keyword[:80] or None
 
 
@@ -158,8 +166,74 @@ class KeywordsEverywhere(KeywordProvider):
         return out
 
 
+class GoogleTrends(KeywordProvider):
+    """Keyless fallback. Google Trends returns relative interest (0-100) per keyword, so each batch
+    includes an anchor keyword with a known US monthly volume and the others are scaled against it.
+    The result is an order-of-magnitude estimate and is labelled as such in the UI."""
+
+    name = "google_trends"
+    ANCHOR = ("affiliate marketing", 90_000)   # ~US Google Ads monthly volume, used only for scaling
+    EXPLORE = "https://trends.google.com/trends/api/explore"
+    MULTILINE = "https://trends.google.com/trends/api/widgetdata/multiline"
+    HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+               "Accept-Language": "en-US,en;q=0.9"}
+
+    def configured(self) -> bool:
+        return os.environ.get("DISABLE_GOOGLE_TRENDS", "").lower() not in ("1", "true", "yes")
+
+    @staticmethod
+    def _strip(text: str) -> Any:
+        import json
+        return json.loads(text.split("\n", 1)[1] if text.startswith(")]}'") else text)
+
+    async def _interest(self, client: httpx.AsyncClient, keywords: list[str]) -> dict[str, float]:
+        import json
+        req = {"comparisonItem": [{"keyword": k, "geo": "", "time": "today 3-m"} for k in keywords],
+               "category": 0, "property": ""}
+        resp = await client.get(self.EXPLORE, params={"hl": "en-US", "tz": "0", "req": json.dumps(req)})
+        if resp.status_code != 200:
+            raise RuntimeError(f"explore HTTP {resp.status_code}")
+        widgets = self._strip(resp.text)["widgets"]
+        widget = next(w for w in widgets if w.get("id") == "TIMESERIES")
+        resp = await client.get(self.MULTILINE, params={"hl": "en-US", "tz": "0", "req": json.dumps(widget["request"]),
+                                                        "token": widget["token"]})
+        if resp.status_code != 200:
+            raise RuntimeError(f"multiline HTTP {resp.status_code}")
+        timeline = self._strip(resp.text)["default"]["timelineData"]
+        sums = [0.0] * len(keywords)
+        for point in timeline:
+            for i, v in enumerate(point.get("value", [])):
+                sums[i] += float(v)
+        n = max(len(timeline), 1)
+        return {k: sums[i] / n for i, k in enumerate(keywords)}
+
+    async def volumes(self, keywords: list[str]) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        anchor_kw, anchor_vol = self.ANCHOR
+        try:
+            async with httpx.AsyncClient(headers=self.HEADERS, timeout=30, follow_redirects=True) as client:
+                await client.get("https://trends.google.com/?geo=US")  # sets the NID cookie Trends expects
+                for i in range(0, len(keywords), 4):          # Trends allows 5 terms per request
+                    batch = keywords[i:i + 4]
+                    interest = await self._interest(client, [anchor_kw] + batch)
+                    base = interest.get(anchor_kw) or 0.0
+                    for k in batch:
+                        if base <= 0:
+                            continue
+                        est = anchor_vol * interest.get(k, 0.0) / base
+                        out[k.lower()] = {
+                            "search_volume": int(round(est, -2)) if est >= 100 else (int(round(est, -1)) if est >= 10 else 0),
+                            "cpc": None, "competition": None,
+                        }
+        except RuntimeError as exc:
+            self.error = f"Google Trends refused the request ({exc}); try again in a few minutes or add a DataForSEO key."
+        except (httpx.HTTPError, KeyError, StopIteration, ValueError) as exc:
+            self.error = f"Google Trends unavailable: {type(exc).__name__}"
+        return out
+
+
 def pick_provider() -> KeywordProvider:
-    for cls in (DataForSEO, KeywordsEverywhere):
+    for cls in (DataForSEO, KeywordsEverywhere, GoogleTrends):
         p = cls()
         if p.configured():
             return p
@@ -194,5 +268,9 @@ async def enrich_posts(posts: list[dict[str, Any]]) -> dict[str, Any]:
             p["keyword_source"] = provider.name
             if p.get("search_volume") is not None:
                 hits += 1
+    if provider.name == "google_trends":
+        return {"provider": provider.name, "ok": True,
+                "detail": f"Estimated volume for {hits}/{len(keywords)} keywords from Google Trends interest "
+                          f"(free, keyless; order-of-magnitude only). Add a DataForSEO key for exact Google Ads volumes."}
     return {"provider": provider.name, "ok": True,
             "detail": f"{provider.name}: volume returned for {hits}/{len(keywords)} keywords"}

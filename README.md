@@ -50,8 +50,17 @@ separately whether the page copy changed while the prices stayed the same.
 
 **Keyword enrichment** (`app/keywords.py`). The target keyword is taken from the title (SEO titles lead
 with it: "Affiliate Marketing: What It Is…" → `affiliate marketing`; otherwise the first meaningful words).
-Search volume, CPC and competition come from DataForSEO (Google Ads search volume endpoint) or Keywords
-Everywhere, whichever is configured. Only new posts are sent to the API to conserve credits.
+Volume comes from the first configured provider in this order:
+
+1. **DataForSEO** (Google Ads search volume, CPC, competition) when `DATAFORSEO_LOGIN/PASSWORD` are set.
+2. **Keywords Everywhere** when `KEYWORDS_EVERYWHERE_API_KEY` is set.
+3. **Google Trends** (built in, no key, no card). Trends only returns relative interest, so every batch
+   includes an anchor keyword with a known US monthly volume and the others are scaled against it. The
+   result is an order-of-magnitude estimate and the UI labels it as such. Set `DISABLE_GOOGLE_TRENDS=1` to
+   turn it off.
+
+Only new posts are looked up, to conserve credits. Provider errors (rejected key, unverified account, rate
+limit) are reported on the run and in the alert; they never stop the crawl.
 
 **Alerts** (`app/alerts.py`). Slack incoming webhook (server-wide `SLACK_WEBHOOK_URL` or pasted per run in
 the UI) and/or SMTP email. The same summary is always shown in the dashboard, so the run is useful without
