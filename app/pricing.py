@@ -142,9 +142,9 @@ async def check_pricing(fetcher: Fetcher, base: str, homepage_html: str, previou
     changed = bool(diff["added"] or diff["removed"])
     if changed:
         detail = f"{len(diff['added'])} price(s) added, {len(diff['removed'])} removed since last check"
-    elif previous.get("content_hash") != content_hash:
-        detail = "Pricing page copy changed but listed prices are the same"
     else:
-        detail = "No pricing changes"
+        # The page hash is kept for the record, but dynamic copy (testimonials, A/B tests) makes it
+        # change on most fetches, so only the price list decides whether anything is reported.
+        detail = f"No pricing changes ({len(prices)} price points unchanged)"
     return {"found": True, "url": url, "changed": changed, "baseline": False, "prices": prices, "hash": content_hash,
             "detail": detail, "diff": diff, "text_changed": previous.get("content_hash") != content_hash}
