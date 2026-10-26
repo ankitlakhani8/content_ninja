@@ -166,7 +166,9 @@ async function pollRun(runId) {
 async function showRun(runId) { const run = await api(`/api/runs/${runId}`); renderRun(run); }
 
 function postRow(p, isNew) {
-  const vol = p.search_volume == null ? '<span style="color:var(--muted)">n/a</span>' : Number(p.search_volume).toLocaleString();
+  const est = p.keyword_source === "google_trends" ? ' <span style="color:var(--muted);font-size:11px">est.</span>' : "";
+  const vol = p.search_volume == null ? '<span style="color:var(--muted)">n/a</span>'
+            : (Number(p.search_volume) === 0 ? "&lt;100" : Number(p.search_volume).toLocaleString()) + est;
   const cpc = typeof p.cpc === "number" ? `$${p.cpc.toFixed(2)}` : "—";
   return `<tr class="${isNew ? "new" : ""}">
     <td><a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title || p.url)}</a>

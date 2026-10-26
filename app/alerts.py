@@ -18,7 +18,10 @@ def _fmt_volume(post: dict[str, Any]) -> str:
         return "vol n/a"
     cpc = post.get("cpc")
     extra = f", CPC ${cpc:.2f}" if isinstance(cpc, (int, float)) else ""
-    return f"{int(vol):,} searches/mo{extra}"
+    est = " (est.)" if post.get("keyword_source") == "google_trends" else ""
+    if int(vol) == 0:
+        return f"<100 searches/mo{est}"
+    return f"{int(vol):,} searches/mo{est}{extra}"
 
 
 def build_summary(domain: str, run: dict[str, Any]) -> tuple[str, str]:
