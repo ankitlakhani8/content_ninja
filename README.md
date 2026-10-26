@@ -100,6 +100,32 @@ database resets on each deploy (fine for a demo, not for production).
 | `GET` | `/api/competitors/{id}/runs` | Run history. |
 | `GET` | `/api/health` | Which keyword provider and alert channels are configured. |
 
+## Tested against
+
+Verified end to end on 60+ real domains, including: ahrefs, semrush, moz, backlinko, neilpatel, buffer, hubspot,
+zapier, notion, stripe, intercom, linear, vercel, anthropic, shopify, canva, atlassian, razorpay, zoho, paytm,
+clickup, monday, asana, figma, surferseo, jasper, grammarly, lemlist, webflow, ghost, ycombinator, a16z,
+wpbeginner, kinsta, cloudflare, digitalocean, techcrunch, mozilla, apple (newsroom), microsoft (news.),
+spotify (newsroom.), airbnb (news.), duolingo (blog.), loom (blog hosted on atlassian.com), calendly, typeform,
+miro, zendesk, salesforce, slack, github, smashingmagazine, copyblogger, paulgraham.
+
+Sites that correctly come back as `blocked`: openai.com, g2.com, glassdoor.com, swiggy.com (202 JS challenge),
+uber.com (503 bot wall), zomato.com (robots.txt disallows all). Sites that correctly come back as `no_blog`:
+example.com, wikipedia.org, substack.com.
+
+Hardening that came out of that testing:
+
+- Content subdomains are probed (`blog.`, `news.`, `newsroom.`, `engineering.`) and a blog that redirects to
+  another company's domain (loom.com/blog → atlassian.com) is followed.
+- Category / tag / index pages are rejected even when the CMS stamps them with `og:type=article` or a
+  `datePublished`, using body-text density plus slug shape.
+- Publish dates fall back through meta tags → JSON-LD → `<time>` → dated URL → embedded JSON → a printed
+  date near the top of the article, so client-rendered sites still get dates where they exist.
+- Every response is capped at 3 MB, every run at 240 s, and a 2xx JavaScript challenge shell counts as
+  blocked rather than "no blog".
+- Input is normalised (`https://www.X.com/blog?x=1` → `x.com`) and private / loopback / link-local targets
+  are refused, so the hosted instance cannot be used to probe its own network.
+
 ## Limits and trade-offs
 
 - Crawls are polite (10 concurrent requests, 15 s timeout) and capped at ~40 verified posts per run, newest

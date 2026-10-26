@@ -31,6 +31,13 @@ MAX_ARTICLES = 40          # articles checked per wave / kept per run (newest fi
 MIN_ARTICLES = 15          # stop fetching further waves once this many real posts are confirmed
 MAX_LISTING_PAGES = 6      # listing pages scanned for article links
 CONCURRENCY = 10
+MAX_BODY_BYTES = 3 * 1024 * 1024  # never read more than 3 MB of any one response
+
+
+def _sniff_charset(raw: bytes) -> str | None:
+    head = raw[:4096].lower()
+    m = re.search(rb"charset=[\"']?([a-z0-9_\-]+)", head)
+    return m.group(1).decode("ascii", "ignore") if m else None
 
 BLOG_PATH_WORDS = (
     "blog", "blogs", "article", "articles", "news", "insights", "resources", "learn",
@@ -50,9 +57,11 @@ LISTING_PATHS = ("/blog", "/blog/", "/articles", "/news", "/insights", "/resourc
                  "/learn", "/guides", "/stories", "/updates", "/journal", "/posts", "/magazine")
 
 BLOCK_MARKERS = (
-    "just a moment", "attention required", "access denied", "cf-browser-verification",
-    "captcha", "verify you are human", "ddos-guard", "bot detection", "request unsuccessful",
-    "enable javascript and cookies to continue", "pardon our interruption",
+    # Specific challenge-page phrases only; plain words like "captcha" appear on normal sites too.
+    "just a moment...", "attention required! | cloudflare", "cf-browser-verification", "cf-chl-",
+    "verify you are human", "ddos-guard", "request unsuccessful. incapsula", "pardon our interruption",
+    "enable javascript and cookies to continue", "px-captcha", "are you a robot", "access denied</h1>",
+    "access denied</title>", "bot detection", "please verify you are a human", "checking your browser",
 )
 
 
@@ -150,20 +159,35 @@ class Fetcher:
         result = FetchResult(url=url)
         async with self.sem:
             try:
-                resp = await self.client.get(url)
-                result.status = resp.status_code
-                result.final_url = str(resp.url)
-                result.content_type = resp.headers.get("content-type", "")
-                if "text" in result.content_type or "xml" in result.content_type or "json" in result.content_type \
-                        or not result.content_type:
-                    result.text = resp.text
+                async with self.client.stream("GET", url) as resp:
+                    result.status = resp.status_code
+                    result.final_url = str(resp.url)
+                    result.content_type = resp.headers.get("content-type", "")
+                    textual = (not result.content_type) or any(
+                        t in result.content_type for t in ("text", "xml", "json", "rss", "atom"))
+                    if textual:
+                        chunks: list[bytes] = []
+                        size = 0
+                        async for chunk in resp.aiter_bytes():
+                            chunks.append(chunk)
+                            size += len(chunk)
+                            if size > MAX_BODY_BYTES:
+                                break
+                        raw = b"".join(chunks)
+                        encoding = resp.charset_encoding or _sniff_charset(raw) or "utf-8"
+                        try:
+                            result.text = raw.decode(encoding, errors="replace")
+                        except LookupError:
+                            result.text = raw.decode("utf-8", errors="replace")
                 snippet = result.text[:4000].lower()
-                if resp.status_code in (401, 403, 429, 503) or (
-                    resp.status_code == 200 and len(result.text) < 20000 and any(m in snippet for m in BLOCK_MARKERS)
-                ):
-                    # Only treat as blocked when the page genuinely looks like a challenge page.
-                    if resp.status_code != 200 or any(m in snippet for m in BLOCK_MARKERS):
-                        result.blocked = True
+                looks_like_challenge = any(m in snippet for m in BLOCK_MARKERS)
+                if result.status in (401, 403, 429, 503):
+                    result.blocked = True
+                elif result.status == 200 and len(result.text) < 20000 and looks_like_challenge:
+                    result.blocked = True
+                elif result.status in (202, 203) and len(result.text) < 5000:
+                    # Akamai / PerimeterX / DataDome style: 202 with a tiny HTML shell that only runs a JS challenge.
+                    result.blocked = True
             except httpx.TimeoutException:
                 result.error = "timeout"
             except httpx.HTTPError as exc:
@@ -187,9 +211,43 @@ def normalize_domain(raw: str) -> str:
         raw = "https://" + raw
     host = urlparse(raw).netloc.split("@")[-1].split(":")[0]
     host = host.strip(".")
-    if not host or "." not in host or " " in host:
+    if host.startswith("www."):
+        host = host[4:]  # one record per site whether the user types www or not
+    if not host or "." not in host or " " in host or len(host) > 253:
+        raise ValueError("That does not look like a valid domain")
+    if not re.fullmatch(r"[a-z0-9 -￿.-]+", host):
+        raise ValueError("Domain contains invalid characters")
+    if host.endswith((".local", ".internal", ".localhost")) or host == "localhost":
+        raise ValueError("Internal hostnames cannot be monitored")
+    if _is_private_host(host):
+        raise ValueError("Private or loopback addresses cannot be monitored")
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
         raise ValueError("That does not look like a valid domain")
     return host
+
+
+def _is_private_host(host: str) -> bool:
+    """SSRF guard for the hosted tool: refuse IPs and names that resolve to private ranges."""
+    import ipaddress
+    import socket
+    try:
+        ip = ipaddress.ip_address(host)
+        return not ip.is_global
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except socket.gaierror:
+        return False  # unresolvable: let the crawl report "unreachable" with the real error
+    for info in infos:
+        try:
+            if not ipaddress.ip_address(info[4][0]).is_global:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def registered_domain(host: str) -> str:
@@ -338,6 +396,29 @@ def extract_article_meta(html: str, url: str) -> dict[str, Any]:
             y, mo, d = m.group(1), m.group(2), m.group(3) or "1"
             published = parse_date(f"{y}-{int(mo):02d}-{int(d):02d}")
 
+    if not published:
+        # Client-rendered sites (Next.js, Gatsby, Contentful) ship the date inside embedded JSON.
+        m = re.search(
+            r"\"(?:datePublished|publishedAt|publishDate|publish_date|published_at|published|date|createdAt|created_at|firstPublishedAt)\""
+            r"\s*:\s*\"((?:19|20)\d{2}-\d{2}-\d{2}[^\"]{0,30})\"",
+            html,
+        )
+        if m:
+            published = parse_date(m.group(1))
+
+    if not published:
+        # Last resort: a human-readable date printed near the top of the article body.
+        body = soup.find("article") or soup.find("main") or soup.body or soup
+        head_text = re.sub(r"\s+", " ", body.get_text(" ", strip=True))[:1500] if body else ""
+        m = re.search(
+            r"\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.? \d{1,2}(?:st|nd|rd|th)?,? (?:19|20)\d{2}"
+            r"|\d{1,2}(?:st|nd|rd|th)? (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.? (?:19|20)\d{2}"
+            r"|(?:19|20)\d{2}-\d{2}-\d{2})\b",
+            head_text,
+        )
+        if m:
+            published = parse_date(m.group(1))
+
     explicit_date = bool(meta.get("article:published_time") or meta.get("datepublished") or meta.get("pubdate"))
     if not explicit_date:
         for script in soup.find_all("script", type=lambda t: t and "ld+json" in t):
@@ -360,12 +441,14 @@ def extract_article_meta(html: str, url: str) -> dict[str, Any]:
     return {
         "title": title, "description": description, "published_at": published, "is_article": is_article,
         "explicit_date": explicit_date, "body_text_len": body_len,
+        "og_article": meta.get("og:type", "").lower() == "article",
     }
 
 
 GENERIC_TITLE_RE = re.compile(
     r"^(all (posts|articles)|articles?|posts?|blog|news|resources?|insights|guides?|podcasts?|page \d+|.*,\s*page \d+|"
-    r"(latest|recent) (posts|articles)|archive|category:.*|tag:.*)$",
+    r"(latest|recent) (posts|articles)|archives?|.* archives?|category:.*|tag:.*|.*\bpage \d+ of \d+.*|"
+    r"site ?map|site ?map .*|.*\bsite ?map\b.*|search|search results.*|404.*|page not found.*)$",
     re.I,
 )
 
@@ -373,9 +456,14 @@ GENERIC_TITLE_RE = re.compile(
 def is_listing_page(meta: dict[str, Any], title: str | None) -> bool:
     if title and GENERIC_TITLE_RE.match(title.strip()):
         return True
-    if meta.get("explicit_date"):
+    body = meta.get("body_text_len", 0)
+    if body >= 700:
         return False
-    return meta.get("body_text_len", 0) < 700
+    # Category hubs on CMS-driven sites often carry og:type=article or a datePublished too, so those
+    # signals only count when there is at least some body text.
+    if (meta.get("og_article") or meta.get("explicit_date")) and body >= 250:
+        return False
+    return True
 
 
 def _find_ld_date(data: Any) -> str | None:
@@ -536,19 +624,24 @@ async def crawl_site(domain: str, progress: Callable[[str], None] | None = None)
                 if len(segs) <= 2:
                     listing_candidates.append(canonical_url(href))
         listing_candidates += [urljoin(base, p) for p in LISTING_PATHS]
-        # Also try the conventional blog subdomain.
+        # Also try the conventional content subdomains (blog.x, news.x, newsroom.x, engineering.x).
         reg = registered_domain(base_host)
-        listing_candidates.append(f"https://blog.{reg}/")
+        for sub in ("blog", "news", "newsroom", "engineering"):
+            listing_candidates.append(f"https://{sub}.{reg}/")
         listing_candidates = list(dict.fromkeys(canonical_url(u) for u in listing_candidates))
 
         def listing_priority(u: str) -> int:
-            path = urlparse(u).path.lower() + ("//" + urlparse(u).netloc if urlparse(u).netloc.startswith("blog.") else "")
+            pu = urlparse(u)
+            path = pu.path.lower() + ("//" + pu.netloc if pu.netloc != base_host else "")
             if "blog" in path:
                 return 0
             if re.search(r"news|articles|insights|posts|journal|stories", path):
                 return 1
             return 2
-        listing_candidates.sort(key=listing_priority)  # stable: keeps nav order within each tier
+        # Stable sort: blog-ish paths first, shallow before deep (so /blog beats /blog/category), nav order kept.
+        listing_candidates.sort(key=lambda u: (listing_priority(u), len(path_segments(u))))
+        home_canon = canonical_url(base)
+        listing_candidates = [u for u in listing_candidates if u != home_canon]
 
         sitemap_candidates = list(dict.fromkeys(fetcher.robots_sitemaps + [urljoin(base, p) for p in SITEMAP_PATHS]))
 
@@ -594,21 +687,31 @@ async def crawl_site(domain: str, progress: Callable[[str], None] | None = None)
         report("Checking blog / resource listing pages")
         listing_articles: dict[str, Article] = {}
         blog_prefixes: list[str] = []
+        listing_pages: dict[str, str] = {}  # prefix -> listing page URL that produced it
         listing_results = await asyncio.gather(*(fetcher.fetch(u) for u in listing_candidates[:14]))
         live_listings = [r for r in listing_results if r.ok and "html" in r.content_type]
         for res in live_listings[:MAX_LISTING_PAGES]:
             lp = urlparse(res.final_url or res.url)
             prefix = lp.path if lp.path not in ("", "/") else "/"
-            if lp.netloc != base_host:
+            foreign_host = not same_site(res.final_url or res.url, base_host)
+            if foreign_host:
+                # e.g. loom.com/blog -> atlassian.com/blog/app/loom: the blog lives on another company's
+                # domain. Accept that host, scoped to its first path segment.
+                segs0 = path_segments(res.final_url or res.url)
+                prefix = "/" + segs0[0] if segs0 else "/"
+                result.notes.append(f"Blog is hosted on another domain: {lp.netloc}{prefix}")
+            elif lp.netloc != base_host:
                 prefix = "/"  # blog subdomain: whole host is the blog
+            elif prefix == "/":
+                continue  # a "blog" link that just redirects home; every slug would count as a post
             lsoup = soup_of(res.text)
             found_here = 0
             for a in lsoup.find_all("a", href=True):
                 href = urljoin(res.final_url or res.url, a["href"].strip())
-                if not same_site(href, base_host):
+                if not same_site(href, base_host) and urlparse(href).netloc != lp.netloc:
                     continue
                 cu = canonical_url(href)
-                host_prefixes = [prefix] if lp.netloc == base_host else ["/"]
+                host_prefixes = [prefix] if (lp.netloc == base_host or foreign_host) else ["/"]
                 if urlparse(cu).netloc == lp.netloc and looks_like_article(cu, host_prefixes) and cu != canonical_url(res.final_url or res.url):
                     title = clean_text(a.get_text(" ", strip=True))
                     if cu not in listing_articles:
@@ -618,9 +721,9 @@ async def crawl_site(domain: str, progress: Callable[[str], None] | None = None)
                         listing_articles[cu].title = title
                     found_here += 1
             if found_here >= 3:
-                blog_prefixes.append(prefix if lp.netloc == base_host else f"//{lp.netloc}")
-                if not result.blog_url:
-                    result.blog_url = res.final_url or res.url
+                key = prefix if lp.netloc == base_host else f"//{lp.netloc}"
+                blog_prefixes.append(key)
+                listing_pages.setdefault(key, res.final_url or res.url)
         if listing_articles:
             result.notes.append(f"Listing pages yielded {len(listing_articles)} article links")
 
@@ -675,10 +778,14 @@ async def crawl_site(domain: str, progress: Callable[[str], None] | None = None)
             a.title = a.title or meta["title"]
             a.published_at = a.published_at or meta["published_at"] or a.lastmod
             a.description = a.description or meta["description"]
+            last = (path_segments(a.url) or [""])[-1].lower()
+            slug_like = ("-" in last and len(last) >= 12) or bool(re.search(r"/20\d{2}/\d{1,2}/", a.url))
             if is_listing_page(meta, a.title):
                 a.title = None  # category / index page, not a post
             elif not meta["is_article"] and a.source == "sitemap" and not a.published_at:
                 a.title = None  # generic site page that slipped through the URL heuristic
+            elif a.source in ("sitemap", "listing") and not slug_like and not meta["og_article"]:
+                a.title = None  # /blog/product, /blog/integrations: section pages, not posts
 
         # Candidates are checked in waves: category pages carry fresh sitemap lastmod dates and
         # would otherwise crowd out real posts from the top of the list.
@@ -700,9 +807,23 @@ async def crawl_site(domain: str, progress: Callable[[str], None] | None = None)
         result.articles = articles
         if not articles:
             result.status = "no_blog"
-            result.detail = "Found candidate links but none resolved to readable articles with a title."
+            result.detail = ("No blog or news section found. Some pages looked like they might be articles but none "
+                             "had an article body with a title and date, so nothing was indexed.")
+        # The blog URL shown to the user is the listing page that produced the most real articles.
+        if listing_pages and articles:
+            counts: dict[str, int] = {}
+            for a in articles:
+                pa = urlparse(a.url)
+                for key in listing_pages:
+                    hit = (pa.netloc == key[2:]) if key.startswith("//") else (pa.netloc == base_host and pa.path.startswith(key))
+                    if hit:
+                        counts[key] = counts.get(key, 0) + 1
+            if counts:
+                best = max(counts, key=lambda k: (counts[k], -len(k)))
+                result.blog_url = listing_pages[best]
         if not result.blog_url:
-            result.blog_url = result.feed_url or (articles[0].url.rsplit("/", 1)[0] if articles else None)
+            result.blog_url = next(iter(listing_pages.values()), None) or result.feed_url or (
+                articles[0].url.rsplit("/", 1)[0] if articles else None)
         return result
     except Exception as exc:  # keep the run alive and surface the error
         result.status = "error"

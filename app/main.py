@@ -24,6 +24,7 @@ from .pricing import check_pricing  # noqa: E402
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 NEW_WINDOW_DAYS = int(os.environ.get("NEW_WINDOW_DAYS", "7"))
+CRAWL_BUDGET_SECONDS = int(os.environ.get("CRAWL_BUDGET_SECONDS", "240"))
 
 app = FastAPI(title="Competitor Monitoring Alert Tool", version="1.0.0")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -54,7 +55,12 @@ async def run_check(competitor_id: int, run_id: int) -> None:
 
     summary: dict[str, Any] = {"domain": domain, "notes": []}
     try:
-        crawl = await crawl_site(domain, progress)
+        try:
+            crawl = await asyncio.wait_for(crawl_site(domain, progress), timeout=CRAWL_BUDGET_SECONDS)
+        except asyncio.TimeoutError:
+            from .crawler import CrawlResult
+            crawl = CrawlResult(domain=domain, status="error",
+                                detail=f"Crawl exceeded the {CRAWL_BUDGET_SECONDS}s time budget; the site is very slow or very large.")
         summary["notes"] = crawl.notes
         summary["blog_url"] = crawl.blog_url
         summary["feed_url"] = crawl.feed_url
