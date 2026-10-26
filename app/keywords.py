@@ -92,18 +92,19 @@ class DataForSEO(KeywordProvider):
         except httpx.HTTPError as exc:
             self.error = f"DataForSEO unreachable: {type(exc).__name__}"
             return out
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
         if resp.status_code == 401:
             self.error = "DataForSEO rejected the credentials (HTTP 401). Check DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD."
             return out
-        if resp.status_code != 200:
-            self.error = f"DataForSEO returned HTTP {resp.status_code}"
+        if resp.status_code != 200 or not data.get("tasks"):
+            # DataForSEO explains itself in status_message (e.g. 40104 "verify your account", 40200 "no money").
+            msg = data.get("status_message") or f"HTTP {resp.status_code}"
+            self.error = f"DataForSEO: {msg}"[:220]
             return out
-        data = resp.json()
-        tasks = data.get("tasks") or []
-        if not tasks:
-            self.error = f"DataForSEO error: {data.get('status_message', 'empty response')}"
-            return out
-        task = tasks[0]
+        task = data["tasks"][0]
         if task.get("status_code") != 20000:
             self.error = f"DataForSEO task error {task.get('status_code')}: {task.get('status_message')}"
             return out
